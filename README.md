@@ -25,7 +25,7 @@ This simple tunnel setup does not provide any kind of security by itself and
 allows arbitrary TCP forwardings. It is intended to be used together with a
 web server which provides the necessary security, for example with nginx:
 
-   location ~ /tunnel/ {
+    location ~ /tunnel/ {
         proxy_pass           http://127.0.0.1:3001;
         proxy_http_version   1.1;
         proxy_set_header     Upgrade $http_upgrade;
