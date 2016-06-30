@@ -28,7 +28,7 @@ Example:
   # connections to local 127.0.0.1:11022 will be passed to 127.0.0.1:22 
   # at tunnel endpoint
   perl wstunnel.pl \
-     --tunnel 'wss://user:pass@example.org/tunnel/127.0.0.1:22' \
+     --tunnel 'wss://user:pass\@example.org/tunnel/127.0.0.1:22' \
      :11022
 
 
