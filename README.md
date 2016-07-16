@@ -14,9 +14,7 @@ Example:
 
     # Run the client (tunnel entry), so that it forwards connections to
     # local port 11022 to 127.0.0.1:22 on the remote system.
-    local-sys$ perl wstunnel.pl \
-      --tunnel ws://remote-sys:3001/127.0.0.1:22 \
-      127.0.0.1:11022
+    local-sys$ perl wstunnel.pl -L :11022 ws://remote-sys:3001/127.0.0.1:22
 
     # Use ssh with this tunnel to log into the remote system.
     local-sys$ ssh -p11022 127.0.0.1
@@ -38,14 +36,22 @@ Assuming that this server has also setup https (recommended) tunnel exit and
 entry could be run like this:
 
     # Run the server (tunnel exit) on port 3001, localhost only.
-    remote-sys$ perl wstunnel.pl 127.0.0.1:3001
+    remote-sys$ perl wstunnel.pl :3001
 
     # Run the client (tunnel entry), so that it forwards connections to
     # local port 11022 to 127.0.0.1:22 on the remote system.
-    local-sys$ perl wstunnel.pl \
-      --tunnel wss://user:pass@remote-sys/tunnel/127.0.0.1:22 \
-      127.0.0.1:11022
+    local-sys$ perl wstunnel.pl -L 11022 \
+	wss://user:pass@remote-sys/tunnel/127.0.0.1:22 
 
     # Use ssh with this tunnel to log into the remote system.
     local-sys$ ssh -p11022 127.0.0.1
+
+    # or setup as ProxyCommand in .ssh/config without using option -L
+    Host remote-sys-via-wstunnel
+    ProxyCommand wstunnel.pl wss://user:pass@remote-sys/tunnel/127.0.0.1:22
+    Hostname remote-sys
+    
+    # And transparently SSH into the host w/o explicit port specification
+    # and tunnel setup
+    local-sys$ ssh remote-sys-via-wstunnel
 

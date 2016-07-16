@@ -15,38 +15,65 @@ sub usage {
     print STDERR "ERROR: @_\n" if @_;
     print <<USAGE;
 
-Usage: $0 [-h|--help] [-T|--tunnel URL] [listen_ip]:port
-    -h|--help        this help
-    -T|--tunnel URL  use URL as entry to tunnel, must be ws:// or wss://
+Usage: $0 [options] tunnel-URL | [listen_ip]:port
+    -h|--help              this help
+
+    --- in server mode ----
+    [listen_ip]:port       listen address in server mode
+			   ip defaults to 127.0.0.1
+
+    --- in client mode ----
+    tunnel-URL             entry to tunnel, must be ws:// or wss://
+    -L|--listen [ip]:port  listen and forward instead of using STDIN/STDOUT
+			   ip defaults to 127.0.0.1
 
 Example:
 
-  # start es server on 127:0.0.1:3001
+  # start server on 127:0.0.1:3001
   perl wstunnel.pl :3001
 
   # connect to tunnel entry using wss:// and authorization
-  # connections to local 127.0.0.1:11022 will be passed to 127.0.0.1:22 
+  # connections to local 127.0.0.1:11022 will be passed to 127.0.0.1:22
   # at tunnel endpoint
-  perl wstunnel.pl \
-     --tunnel 'wss://user:pass\@example.org/tunnel/127.0.0.1:22' \
-     :11022
+  perl wstunnel.pl --listen 11022
+     wss://user:pass\@example.org/tunnel/127.0.0.1:22
+
+  # do not listen but instead just forward data from STDIN through
+  # tunnel and write data from tunnel endpoint to STDOUT
+  perl wstunnel.pl wss://user:pass\@example.org/tunnel/127.0.0.1:22
+
+  # as ProxyCommand in .ssh/config to work around firewalls which block
+  # direct access to SSH
+  Host example.org-via-wstunnel
+  ProxyCommand wstunnel.pl wss://user:pass\@example.org/tunnel/127.0.0.1:22
+  Hostname example.org
+
 
 
 USAGE
     exit(2);
 }
 
-my $tunnel;
+my $listen;
 GetOptions(
-    'h|help'   => sub { usage() },
-    'tunnel=s' => \$tunnel,
+    'h|help'     => sub { usage() },
+    'l|listen=s' => \$listen,
 ) or usage();
 
-my $listen = shift(@ARGV) or usage('no listen address');
+my $tunnel = shift(@ARGV) or usage('no tunnel URL or server [ip]:port');
 @ARGV and usage('too much arguments');
 
-$listen =~m{^(.*?):(\d+)\z} or usage('bad listen address');
-my %listen = ( port => $2, address => $1||'127.0.0.1' );
+if ($tunnel !~m{^\w+://}) {
+    usage("-L|--listen can not be used in server mode") if $listen;
+    $listen = $tunnel;
+    $tunnel = undef;
+}
+
+my %listen;
+if ($listen) {
+    $listen =~m{^(.*?):(\d+)\z} or usage('bad listen address');
+    %listen = ( port => $2, address => $1||'127.0.0.1' );
+}
 
 if ($tunnel) {
     my $ua = Mojo::UserAgent->new;
@@ -62,18 +89,32 @@ if ($tunnel) {
 	    IO::Socket::SSL::default_ca(),
 	});
     }
-    Mojo::IOLoop->server(\%listen, sub {
-	my ($loop,$tcp) = @_;
-	warn "new connection\n";
-	$tcp->stop;
+
+    if (%listen) {
+	Mojo::IOLoop->server(\%listen, sub {
+	    my ($loop,$tcp) = @_;
+	    warn "new connection\n";
+	    $tcp->stop;
+
+	    $ua->websocket($tunnel, sub {
+		my (undef,$tx) = @_;
+		$tx->res->code == 101 or die $tx->res->code;
+		_tcp_transfer(\$tx,\$tcp);
+	    });
+	});
+    } else {
+	my $read = Mojo::IOLoop::Stream->new(\*STDIN);
+	my $write = Mojo::IOLoop::Stream->new(\*STDOUT);
+	STDOUT->autoflush;
 
 	$ua->websocket($tunnel, sub {
 	    my (undef,$tx) = @_;
 	    $tx->res->code == 101 or die $tx->res->code;
-	    $tcp->start;
-	    \&_transfer(\$tcp,\$tx);
+	    warn "created tunnel\n";
+	    _stream_transfer(\$tx,\$read,\$write);
 	});
-    });
+    }
+
     Mojo::IOLoop->start;
 
 } else {
@@ -95,23 +136,23 @@ if ($tunnel) {
 	Mojo::IOLoop->client(address => $host, port => $port, sub {
 	    my ($loop, $err, $tcp) = @_;
 	    $tx->finish(4500, "TCP connection error: $err") if $err;
-	    \&_transfer(\$tcp,\$tx);
+	    _tcp_transfer(\$tx,\$tcp);
 	});
     };
     app->start('daemon','-l','http://'.$listen{address}.":$listen{port}")
 }
 
 
-sub _transfer {
-    my ($rtcp,$rtx) = @_;
-    $$rtcp->on(error => sub { 
+sub _tcp_transfer {
+    my ($rtx,$rtcp) = @_;
+    $$rtcp->on(error => sub {
 	warn "connection error\n";
-	$$rtx->finish(4500, "TCP error: $_[1]") 
+	$$rtx->finish(4500, "TCP error: $_[1]")
     });
 
-    $$rtcp->on(close => sub { 
+    $$rtcp->on(close => sub {
 	warn "connection closed\n";
-	$$rtx->finish(4500, "TCP close") 
+	$$rtx->finish(4500, "TCP close")
     });
 
     $$rtcp->on(read => sub {
@@ -128,4 +169,43 @@ sub _transfer {
 	$$rtcp->close;
 	$$rtcp = $$rtx = undef;
     });
+
+    $$rtcp->start;
+}
+
+sub _stream_transfer {
+    my ($rtx,$rread,$rwrite) = @_;
+    for ($$rread,$$rwrite) {
+	$_->on(error => sub {
+	    warn "connection error\n";
+	    $$rtx->finish(4500, "TCP error: $_[1]")
+	});
+
+	$_->on(close => sub {
+	    warn "connection closed\n";
+	    $$rtx->finish(4500, "TCP close")
+	});
+    }
+
+    $$rread->on(read => sub {
+	my (undef, $bytes) = @_;
+	$$rtx->send({binary => $bytes});
+    });
+
+    $$rtx->on(binary => sub {
+	my (undef, $bytes) = @_;
+	$$rread->stop;
+	$$rwrite->write($bytes, sub {
+	    $$rread->start;
+	});
+    });
+
+    $$rtx->on(finish => sub {
+	$$rread->close;
+	$$rwrite->close;
+	$$rread = $$rwrite = $$rtx = undef;
+    });
+
+    $$rwrite->start;
+    $$rread->start;
 }
